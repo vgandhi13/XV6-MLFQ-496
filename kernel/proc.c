@@ -5,6 +5,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "pstat.h"
 
 struct cpu cpus[NCPU];
 
@@ -20,11 +21,46 @@ static void freeproc(struct proc *p);
 
 extern char trampoline[]; // trampoline.S
 
+const int MAX_TICKS_PER_QUEUE[4] = {4, 8, 16, 32}; // Define max_ticks_per_queue
+
+// struct spinlock mlfq_tickslock; // required for multi core implentation
+int mlfq_ticks = 0;
+int newticks = 0;  //rempve (for debug purposes)
+const int MLFQ_PB_VOO_DOO_CONST = 200;
+int current_priority_queue = 0;
+
 // helps ensure that wakeups of wait()ing
 // parents are not lost. helps obey the
 // memory model when using p->parent.
 // must be acquired before any p->lock.
 struct spinlock wait_lock;
+
+void
+procinfo_helper(struct pstat * ps3) {
+  struct proc * p;
+  printf("\n in proc info helper %s %d \n",myproc()->name, myproc()->state);
+  for (int i = 0; i < NPROC; i++) {
+        ps3->inuse[i] = 0;
+        ps3->pid[i] = 0;
+        ps3->priority[i] = 0;
+        for (int j = 0; j < 4; j++) {
+            ps3->ticks[i][j] = 0;
+        }
+  }
+
+  int i = 0;
+  for(p = proc; p < &proc[NPROC]; p++) {
+    if(p->state != UNUSED) {
+      ps3->inuse[i] = 1;
+    }
+    ps3->pid[i] = p->pid;
+    ps3->priority[i] = p->curq;
+    for (int j = 0; j < 4; j++) {
+        ps3->ticks[i][j] = p->queue_ticks[j];
+    }
+    i+=1;
+  }
+}
 
 // Allocate a page for each process's kernel stack.
 // Map it high in memory, followed by an invalid
@@ -122,9 +158,19 @@ allocproc(void)
   return 0;
 
 found:
+  //printf("ALLOCPROC ENTERED \n");
   p->pid = allocpid();
   p->state = USED;
 
+  //Added for MLFQ
+  p->curq = 0;  //putting the newly allocated process in the topmost queue
+  p->curq_ticks_left = MAX_TICKS_PER_QUEUE[p->curq];  //initializing the time slice of the process with 4 ticks
+  p->curq_run = 0;  //process hasn't been scheduled yet
+  for (int i = 0; i < 4; i++) {
+        p->queue_ticks[i] = 0; //initializing time spent by process in each queue to 0
+  }
+  current_priority_queue = 0; //since the process was allocated in the topmost priority queue, our scheduler thread will now schedule from topmost queue
+  
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
     freeproc(p);
@@ -145,7 +191,9 @@ found:
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
-
+  // printf("process name: %s", p->name);
+  // printf("ALLOCPROC exit \n");
+  // printf("\n\n\n");
   return p;
 }
 
@@ -169,6 +217,14 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+  
+  //Added for MLFQ
+  p->curq = -1; 
+  p->curq_ticks_left = 0;
+  p->curq_run = 0;
+  for (int i = 0; i < 4; i++) {
+        p->queue_ticks[i] = 0; //resetting time spent by process in each queue to 0
+  }
 }
 
 // Create a user page table for a given process, with no user memory,
@@ -234,7 +290,7 @@ userinit(void)
 {
   struct proc *p;
 
-  p = allocproc();
+  p = allocproc(); //adds the new process in the topmost priority queue, we dont need to do anything here
   initproc = p;
   
   // allocate one user page and copy initcode's instructions
@@ -284,7 +340,7 @@ fork(void)
   struct proc *p = myproc();
 
   // Allocate process.
-  if((np = allocproc()) == 0){
+  if((np = allocproc()) == 0){ //adds the new process in the topmost priority queue, we dont need to do anything here
     return -1;
   }
 
@@ -434,6 +490,21 @@ wait(uint64 addr)
   }
 }
 
+void prioriy_boost() { //not holding a lock on this function call
+  mlfq_ticks = 0; //setting the ticks back to 0
+  struct proc *p;
+
+  //reassigning the queue and time slices for each process. Also setting the current run to 0
+  for(p = proc; p < &proc[NPROC]; p++) {
+      acquire(&p->lock);
+      p->curq_run = 0;
+      p->curq = 0;
+      p->curq_ticks_left = MAX_TICKS_PER_QUEUE[0];
+      release(&p->lock);
+  }
+  current_priority_queue = 0;  //setting the queue back to topmost queue
+}
+
 // Per-CPU process scheduler.
 // Each CPU calls scheduler() after setting itself up.
 // Scheduler never returns.  It loops, doing:
@@ -451,13 +522,22 @@ scheduler(void)
   for(;;){
     // Avoid deadlock by ensuring that devices can interrupt.
     intr_on();
+    int process_found = 0; //to check if a process was found in the current priority queue. Initially set to 0. If found then 1.
 
     for(p = proc; p < &proc[NPROC]; p++) {
       acquire(&p->lock);
-      if(p->state == RUNNABLE) {
+      if((p->state == RUNNABLE)&& (p->curq == current_priority_queue)) { // 
         // Switch to chosen process.  It is the process's job
         // to release its lock and then reacquire it
         // before jumping back to us.
+        process_found = 1;
+        printf("p->curq: %d \n", p->curq);
+        printf("current queue global var: %d \n", current_priority_queue);
+        printf("current run: %d \n", p->curq_run);
+        printf("current ticks left: %d \n", p->curq_ticks_left);
+        printf("name: %s \n", p->name);
+        printf("ticks: %d, newticks: %d", ticks, newticks);
+        printf("\n\n\n");
         p->state = RUNNING;
         c->proc = p;
         swtch(&c->context, &p->context);
@@ -467,6 +547,27 @@ scheduler(void)
         c->proc = 0;
       }
       release(&p->lock);
+      
+      if (mlfq_ticks == MLFQ_PB_VOO_DOO_CONST) {
+        prioriy_boost();
+        printf("\n------------------------Priority Boost-------------------------\n");
+        break; //start from the top in the queue . We do so because when processes are allocated we choose the ones with lowest index.
+      }
+    }
+    if (process_found == 0) { //if no process was found in the current priority queue, we move to the next priority queue
+      if (current_priority_queue != 3) { //not the bottommost priority queue
+        current_priority_queue += 1;
+      }
+      else { //when no process was found but we are in the last priority queue, we check what is the lowest queue with a process and shift there
+        // current_priority_queue is 3 before this loop
+        for(p = proc; p < &proc[NPROC]; p++) {
+          acquire(&p->lock);
+          if((p->state == RUNNABLE) && (p->curq < current_priority_queue)) {
+            current_priority_queue = p->curq;   //updating the current priority queue to whichever process is in the priority queue with highest priority
+          }
+          release(&p->lock);
+        }
+      }
     }
   }
 }
@@ -498,14 +599,61 @@ sched(void)
   mycpu()->intena = intena;
 }
 
+int
+mlfq_yield_helper(struct proc *p) {  //When called from yield, 1 returned when there should be a context switch, 0 returned when current process is allowed to continue.
+  p->curq_ticks_left -= 1;
+  p->curq_run += 1;
+  p->queue_ticks[p->curq] += 1; //incrementing the time spent by process in current priority queue by 1
+  // printf("\n %s entered yield \n", p->name);
+  // printf("Inside mlfq yield helper");
+  printf("\n current run: %d \n", p->curq_run);
+  // printf("current ticks left: %d \n", p->curq_ticks_left);
+  // printf("End of mlfq yield helper");
+  // acquire(&mlfq_ticks);  //required for multicore
+  mlfq_ticks += 1;
+  newticks += 1; //rempve (for debug purposes)
+  if (mlfq_ticks == MLFQ_PB_VOO_DOO_CONST) {
+    //release(&mlfq_ticks); 
+    return 1; //this will ensure the context switch from cur proc kernel thread to scheduler thread, and then in the scheduler thread there will be a priority boost
+  }   //below code doesn't need to be executed because there will be a prioriy boost in kernel thread so it wont matter
+  //release(&mlfq_ticks);     //required for multicore
+
+  if(p->curq_ticks_left == 0) {  //if time slice of current process is over
+    if (p->curq != 3) { //if curq is not 3, that is not the last priority queue
+      p->curq += 1;
+      p->curq_ticks_left = MAX_TICKS_PER_QUEUE[p->curq]; //set the time slice of the process to max ticks depending on the queue
+      p->curq_run = 0;
+      return 1;
+    }
+    else {
+      if (p->curq_run != MAX_TICKS_PER_QUEUE[3]) { //if in current scheduling process has not ran for 32 ticks
+        p->curq_ticks_left = MAX_TICKS_PER_QUEUE[3] - p->curq_run; //set the time slice again to 32 - whatever time it has been running for so far. 
+        //We do so to ensure that no process runs for more than 32 ticks at a time in the last queue
+        return 0;
+      }
+      else {
+        p->curq_ticks_left = MAX_TICKS_PER_QUEUE[3];
+        p->curq_run = 0;
+        return 1;
+      }
+    }
+  }
+  return 0;
+}
+
+
 // Give up the CPU for one scheduling round.
 void
 yield(void)
 {
   struct proc *p = myproc();
   acquire(&p->lock);
-  p->state = RUNNABLE;
-  sched();
+  if (mlfq_yield_helper(p) == 1) { //if no time slice left for process to continue
+    // printf("YIELD TIMER INTERRUPT");
+    // printf("\n\n\n\n");
+    p->state = RUNNABLE;
+    sched();
+  } //otherwise let the process continue, yield will return in usertrap/kerneltrap and process will continue execution
   release(&p->lock);
 }
 
@@ -551,7 +699,10 @@ sleep(void *chan, struct spinlock *lk)
   p->chan = chan;
   p->state = SLEEPING;
 
-  sched();
+  // printf("SLEEP CONTEXT SWITCH");
+  // printf("%d", ticks);
+  // printf("\n\n\n\n");
+  sched();   //we don't need to update any fields of process before the context switch
 
   // Tidy up.
   p->chan = 0;
@@ -564,7 +715,7 @@ sleep(void *chan, struct spinlock *lk)
 // Wake up all processes sleeping on chan.
 // Must be called without any p->lock.
 void
-wakeup(void *chan)
+wakeup(void *chan)   //processes will continue from their respective priority queue, not necessarily the topmost
 {
   struct proc *p;
 
@@ -573,6 +724,11 @@ wakeup(void *chan)
       acquire(&p->lock);
       if(p->state == SLEEPING && p->chan == chan) {
         p->state = RUNNABLE;
+
+        if (p->curq < current_priority_queue) {  //if we are waking up a process which has a higher priority than the priority queue we were last executing in
+            current_priority_queue = p->curq;
+        }
+
       }
       release(&p->lock);
     }
@@ -593,6 +749,7 @@ kill(int pid)
       p->killed = 1;
       if(p->state == SLEEPING){
         // Wake process from sleep().
+        printf("killed %s",p->name);
         p->state = RUNNABLE;
       }
       release(&p->lock);

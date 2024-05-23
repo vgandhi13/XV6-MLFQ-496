@@ -76,6 +76,7 @@ usertrap(void)
   if(killed(p))
     exit(-1);
 
+  //printf("entered user trap");
   // give up the CPU if this is a timer interrupt.
   if(which_dev == 2)
     yield();
@@ -149,9 +150,9 @@ kerneltrap()
     printf("sepc=%p stval=%p\n", r_sepc(), r_stval());
     panic("kerneltrap");
   }
-
+  // printf("entered kernel trap");
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2 && myproc() != 0 && myproc()->state == RUNNING)
+  if(which_dev == 2 && myproc() != 0 && myproc()->state == RUNNING)  //when all processes are sleeping, this is called every 1/10th second but yield not entered as state not running
     yield();
 
   // the yield() may have caused some traps to occur,

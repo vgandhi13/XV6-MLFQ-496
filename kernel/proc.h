@@ -104,4 +104,14 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+
+  //MLFQ Implementation
+  int curq;   //current queue
+  int curq_ticks_left;  //1 tick is 10 ms
+  int curq_run;  //ticks process ran for when it was last scheduled
+  int queue_ticks[4];  //time spent for process in each queue (useful for debugging purposes)
 };
+
+extern const int max_ticks_per_queue[4]; // Max Allowed timer ticks for each process in particular queue. 
+                                     // Lower index is proportional to higher priority queue
+                                  

@@ -5,6 +5,7 @@
 #include "memlayout.h"
 #include "spinlock.h"
 #include "proc.h"
+#include "pstat.h"
 
 uint64
 sys_exit(void)
@@ -88,4 +89,20 @@ sys_uptime(void)
   xticks = ticks;
   release(&tickslock);
   return xticks;
+}
+
+uint64
+sys_procinfo(void) {
+    // Initialize ps structure
+    uint64 ps;
+    struct pstat ps2;
+
+    argaddr(0, &ps);
+
+    procinfo_helper(&ps2);
+
+    if(copyout(myproc()->pagetable, ps, (char *)&ps2, sizeof(ps2)) < 0) {
+      return -1;
+    }
+    return 0;
 }

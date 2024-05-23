@@ -6,11 +6,11 @@
 
 volatile static int started = 0;
 
-// start() jumps here in supervisor mode on all CPUs.
+// start() jumps here in supervisor mode on all CPUs. 
 void
 main()
 {
-  if(cpuid() == 0){
+  if(cpuid() == 0){ //for each core cpuid returns value of tp register , only core 0 executes this 
     consoleinit();
     printfinit();
     printf("\n");
@@ -29,7 +29,7 @@ main()
     fileinit();      // file table
     virtio_disk_init(); // emulated hard disk
     userinit();      // first user process
-    __sync_synchronize();
+    __sync_synchronize();  //compiler magic to finish everything above this line before moving ahead  
     started = 1;
   } else {
     while(started == 0)
